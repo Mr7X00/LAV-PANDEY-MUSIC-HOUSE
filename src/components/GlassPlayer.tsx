@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Track } from '../types';
-import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Shuffle, Repeat, Radio, Disc, Sparkles } from 'lucide-react';
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Shuffle, Repeat, Radio, Music, Tv } from 'lucide-react';
 import { playButtonBeep, playCassetteDeckClick } from '../utils/soundEffects';
 
 interface GlassPlayerProps {
@@ -45,65 +45,162 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
   setRepeatOn,
   soundFxEnabled
 }) => {
+  const [activeSource, setActiveSource] = useState<'youtube' | 'spotify' | 'audio'>('youtube');
   const [volume, setVolume] = useState(80);
   const [isMuted, setIsMuted] = useState(false);
+  const [fallbackBanner, setFallbackBanner] = useState<string | null>(null);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const playerRef = useRef<any>(null);
+  const isReadyRef = useRef(false);
   const timerRef = useRef<any>(null);
 
-  // Load YouTube IFrame API dynamically & initialize Web Audio fallback synth
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const synthIntervalRef = useRef<any>(null);
+  // Keep live refs to avoid stale closures in YouTube callbacks
+  const isPlayingRef = useRef(isPlaying);
+  const currentTrackRef = useRef(currentTrack);
+  const volumeRef = useRef(volume);
+  const isMutedRef = useRef(isMuted);
 
-  // Initialize Web Audio Synth for fallback retro beats
-  const startSynthBeat = () => {
-    stopSynthBeat();
-    try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      }
-      if (audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume();
-      }
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
 
-      const ctx = audioContextRef.current;
-      let step = 0;
-      const notes = [220, 261.63, 293.66, 329.63, 392.00, 440, 523.25, 587.33];
+  const hasAttemptedSearchRef = useRef(false);
 
-      synthIntervalRef.current = setInterval(() => {
-        if (!isPlaying) return;
-        try {
-          // Synth Bass / Melody line
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          
-          const freq = notes[(step * 3 + (currentTrack ? currentTrack.id.charCodeAt(0) : 0)) % notes.length];
-          osc.type = step % 4 === 0 ? 'sawtooth' : 'sine';
-          osc.frequency.setValueAtTime(freq, ctx.currentTime);
-
-          const vol = (isMuted ? 0 : volume / 100) * 0.15;
-          gain.gain.setValueAtTime(vol, ctx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-
-          osc.start();
-          osc.stop(ctx.currentTime + 0.25);
-
-          step = (step + 1) % 16;
-        } catch {
-          // ignore synth tick error
-        }
-      }, 250);
-    } catch {
-      // AudioContext not supported or restricted
+  // HTML5 Audio sync
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = isMuted ? 0 : volume / 100;
     }
-  };
+  }, [volume, isMuted]);
 
-  const stopSynthBeat = () => {
-    if (synthIntervalRef.current) {
-      clearInterval(synthIntervalRef.current);
-      synthIntervalRef.current = null;
+  useEffect(() => {
+    if (activeSource === 'audio' && audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.play().catch(() => {});
+      } else {
+        audioRef.current.pause();
+      }
+    }
+  }, [isPlaying, activeSource]);
+
+  const initPlayer = () => {
+    if (!containerRef.current) return;
+    try {
+      containerRef.current.innerHTML = '<div id="yt-player-target" style="width:100%;height:100%"></div>';
+
+      const config: any = {
+        height: '100%',
+        width: '100%',
+        playerVars: {
+          autoplay: 1,
+          controls: 1,
+          disablekb: 0,
+          fs: 1,
+          rel: 0,
+          modestbranding: 1,
+          enablejsapi: 1,
+          playsinline: 1
+        },
+        events: {
+          onReady: (event: any) => {
+            isReadyRef.current = true;
+            playerRef.current = event.target;
+
+            try {
+              event.target.setVolume(isMutedRef.current ? 0 : volumeRef.current);
+              event.target.unMute();
+            } catch {
+              // ignore
+            }
+
+            const current = currentTrackRef.current;
+            if (current && activeSource === 'youtube') {
+              if (current.youtubeId.startsWith('PL')) {
+                event.target.loadPlaylist({ listType: 'playlist', list: current.youtubeId, index: 0 });
+              } else {
+                event.target.loadVideoById(current.youtubeId);
+              }
+            }
+
+            if (isPlayingRef.current && activeSource === 'youtube') {
+              try {
+                event.target.playVideo();
+              } catch {
+                // ignore
+              }
+            }
+          },
+          onError: (event: any) => {
+            console.warn('YouTube playback error code:', event.data);
+            const current = currentTrackRef.current;
+            if (!current) return;
+
+            if (!hasAttemptedSearchRef.current && playerRef.current) {
+              hasAttemptedSearchRef.current = true;
+              
+              if (current.fallbackYoutubeIds && current.fallbackYoutubeIds.length > 0) {
+                const fallbackId = current.fallbackYoutubeIds[0];
+                if (fallbackId.startsWith('PL') && typeof playerRef.current.loadPlaylist === 'function') {
+                  playerRef.current.loadPlaylist({ listType: 'playlist', list: fallbackId, index: 0 });
+                  return;
+                } else if (typeof playerRef.current.loadVideoById === 'function') {
+                  playerRef.current.loadVideoById(fallbackId);
+                  return;
+                }
+              }
+
+              const categoryPlaylists: Record<string, string> = {
+                'punjabi-rap': 'PL4fGSI1pDJn6O1LS0XSdF3RyO0Sq_kbL2',
+                'hip-hop': 'PL8f_T3R9_xLp4_0_0',
+                'honey-singh': 'PLDIoUOhQQPlWm_njQtKkNIk5RYSGgzomm',
+                'old-songs': 'PLc3S32Y2L3k5vL2c_8',
+                'hindi-2000s': 'PLc3S32Y2L3k5vL2c_8',
+                'bhajan-spiritual': 'PLc3S32Y2L3k5vL2c_8'
+              };
+
+              const fallbackPlaylist = categoryPlaylists[current.categoryId] || 'PLc3S32Y2L3k5vL2c_8';
+              if (typeof playerRef.current.loadPlaylist === 'function') {
+                playerRef.current.loadPlaylist({
+                  listType: 'playlist',
+                  list: fallbackPlaylist,
+                  index: 0
+                });
+                return;
+              }
+            }
+
+            // Fallback to HQ Audio stream so music never stops playing
+            setFallbackBanner(`Playing HQ MP3 Stream for "${current.title}"`);
+            setActiveSource('audio');
+            setIsPlaying(true);
+          },
+          onStateChange: (event: any) => {
+            if (event.data === 1) {
+              setIsPlaying(true);
+              startTicker();
+            } else if (event.data === 2) {
+              setIsPlaying(false);
+              stopTicker();
+            } else if (event.data === 0) {
+              setIsPlaying(false);
+              stopTicker();
+              if (repeatOn) {
+                playerRef.current?.seekTo(0);
+                playerRef.current?.playVideo();
+              } else {
+                onNextTrack();
+              }
+            }
+          }
+        }
+      };
+
+      playerRef.current = new window.YT.Player('yt-player-target', config);
+    } catch (e) {
+      console.error('Failed to create YouTube player instance:', e);
     }
   };
 
@@ -123,93 +220,16 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      stopSynthBeat();
     };
   }, []);
-
-  const initPlayer = () => {
-    if (playerRef.current) return;
-    try {
-      const initialId = currentTrack ? currentTrack.youtubeId : 'pb8T_1m9B-8';
-      const isPlaylist = initialId.startsWith('PL');
-
-      const config: any = {
-        height: '100%',
-        width: '100%',
-        playerVars: {
-          autoplay: 1,
-          controls: 0,
-          disablekb: 1,
-          fs: 0,
-          rel: 0,
-          modestbranding: 1,
-          enablejsapi: 1,
-          playsinline: 1,
-          origin: window.location.origin
-        },
-        events: {
-          onReady: (event: any) => {
-            try {
-              event.target.setVolume(volume);
-              event.target.unMute();
-            } catch {
-              // ignore
-            }
-            if (isPlaying) {
-              try {
-                if (isPlaylist && typeof event.target.loadPlaylist === 'function') {
-                  event.target.loadPlaylist({ listType: 'playlist', list: initialId });
-                } else {
-                  event.target.playVideo();
-                }
-              } catch {
-                startSynthBeat();
-              }
-            }
-          },
-          onError: () => {
-            // If YouTube video embed is restricted (e.g. error 150/101), start synthesized retro audio beat
-            startSynthBeat();
-          },
-          onStateChange: (event: any) => {
-            // YT.PlayerState.PLAYING = 1, PAUSED = 2, ENDED = 0
-            if (event.data === 1) {
-              setIsPlaying(true);
-              stopSynthBeat();
-              startTicker();
-            } else if (event.data === 2) {
-              setIsPlaying(false);
-              stopTicker();
-              stopSynthBeat();
-            } else if (event.data === 0) {
-              setIsPlaying(false);
-              stopTicker();
-              stopSynthBeat();
-              if (repeatOn) {
-                playerRef.current?.seekTo(0);
-                playerRef.current?.playVideo();
-              } else {
-                onNextTrack();
-              }
-            }
-          }
-        }
-      };
-
-      if (!isPlaylist) {
-        config.videoId = initialId;
-      }
-
-      playerRef.current = new window.YT.Player('youtube-player-element', config);
-    } catch {
-      startSynthBeat();
-    }
-  };
 
   // Sync YouTube player when currentTrack changes
   useEffect(() => {
     if (!currentTrack) return;
-    if (playerRef.current) {
+    hasAttemptedSearchRef.current = false;
+    setFallbackBanner(null);
+
+    if (activeSource === 'youtube' && isReadyRef.current && playerRef.current) {
       try {
         const isPlaylist = currentTrack.youtubeId.startsWith('PL');
         if (isPlaylist && typeof playerRef.current.loadPlaylist === 'function') {
@@ -226,56 +246,59 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
         if (isPlaying && typeof playerRef.current.playVideo === 'function') {
           playerRef.current.playVideo();
         }
-      } catch {
-        startSynthBeat();
+      } catch (e) {
+        console.error('Error loading video on player:', e);
       }
-    } else {
-      if (isPlaying) startSynthBeat();
+    } else if (activeSource === 'audio' && audioRef.current && currentTrack.audioUrl) {
+      audioRef.current.src = currentTrack.audioUrl;
+      if (isPlaying) {
+        audioRef.current.play().catch(() => {});
+      }
     }
-  }, [currentTrack]);
+  }, [currentTrack, activeSource]);
 
-  // Sync Play / Pause state with YouTube player & synth fallback
+  // Sync Play / Pause state with active player source
   useEffect(() => {
-    if (isPlaying) {
-      if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
-        try {
-          playerRef.current.unMute();
-          playerRef.current.setVolume(isMuted ? 0 : volume);
-          playerRef.current.playVideo();
-        } catch {
-          startSynthBeat();
+    if (activeSource === 'youtube' && isReadyRef.current && playerRef.current) {
+      if (isPlaying) {
+        if (typeof playerRef.current.playVideo === 'function') {
+          try {
+            playerRef.current.unMute();
+            playerRef.current.setVolume(isMuted ? 0 : volume);
+            playerRef.current.playVideo();
+          } catch {}
         }
+        startTicker();
       } else {
-        startSynthBeat();
-      }
-      startTicker();
-    } else {
-      if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
-        try {
-          playerRef.current.pauseVideo();
-        } catch {
-          // ignore
+        if (typeof playerRef.current.pauseVideo === 'function') {
+          try {
+            playerRef.current.pauseVideo();
+          } catch {}
         }
+        stopTicker();
       }
-      stopSynthBeat();
-      stopTicker();
+    } else if (activeSource === 'audio' && audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.play().catch(() => {});
+      } else {
+        audioRef.current.pause();
+      }
     }
-  }, [isPlaying]);
+  }, [isPlaying, activeSource]);
 
   // Sync Volume
   useEffect(() => {
-    if (!playerRef.current) return;
-    try {
-      playerRef.current.setVolume(isMuted ? 0 : volume);
-    } catch {
-      // Fallback
+    if (playerRef.current && typeof playerRef.current.setVolume === 'function') {
+      try {
+        playerRef.current.setVolume(isMuted ? 0 : volume);
+      } catch {}
     }
   }, [volume, isMuted]);
 
   const startTicker = () => {
     stopTicker();
     timerRef.current = setInterval(() => {
-      if (playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
+      if (activeSource === 'youtube' && playerRef.current && typeof playerRef.current.getCurrentTime === 'function') {
         const curr = playerRef.current.getCurrentTime() || 0;
         const dur = playerRef.current.getDuration() || currentTrack?.durationSeconds || 0;
         setCurrentTime(curr);
@@ -295,8 +318,10 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
     const targetSeconds = ratio * (duration || currentTrack?.durationSeconds || 1);
 
     setCurrentTime(targetSeconds);
-    if (playerRef.current && typeof playerRef.current.seekTo === 'function') {
+    if (activeSource === 'youtube' && playerRef.current && typeof playerRef.current.seekTo === 'function') {
       playerRef.current.seekTo(targetSeconds, true);
+    } else if (activeSource === 'audio' && audioRef.current) {
+      audioRef.current.currentTime = targetSeconds;
     }
   };
 
@@ -311,7 +336,7 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
   const handleTogglePlayClick = () => {
     if (soundFxEnabled) playCassetteDeckClick();
 
-    if (playerRef.current) {
+    if (activeSource === 'youtube' && playerRef.current) {
       try {
         if (typeof playerRef.current.unMute === 'function') {
           playerRef.current.unMute();
@@ -320,29 +345,113 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
         if (!isPlaying && typeof playerRef.current.playVideo === 'function') {
           playerRef.current.playVideo();
         }
-      } catch {
-        // ignore
+      } catch {}
+    } else if (activeSource === 'audio' && audioRef.current) {
+      if (!isPlaying) {
+        audioRef.current.play().catch(() => {});
+      } else {
+        audioRef.current.pause();
       }
-    }
-
-    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume();
     }
 
     onTogglePlay();
   };
 
+  // Helper for Spotify Embed Link
+  const categorySpotifyPlaylists: Record<string, string> = {
+    'punjabi-rap': 'playlist/37i9dQZF1DX6X3beRd2Iat',
+    'hip-hop': 'playlist/37i9dQZF1DX1u5P2J5Y4y9',
+    'honey-singh': 'playlist/37i9dQZF1DX8IInVq5zU12',
+    'old-songs': 'playlist/37i9dQZF1DX143p2R5Y4y9',
+    'hindi-2000s': 'playlist/37i9dQZF1DX4LUTLOM313A',
+    'bhajan-spiritual': 'playlist/37i9dQZF1DX3I2mU7uP444'
+  };
+
+  const getSpotifyEmbedUrl = () => {
+    const defaultPlaylist = categorySpotifyPlaylists[currentTrack?.categoryId || 'old-songs'] || 'playlist/37i9dQZF1DX143p2R5Y4y9';
+    let target = currentTrack?.spotifyId || defaultPlaylist;
+    
+    // Fallback if fake or invalid ID is present
+    if (target.includes('g3y3a45b6c7') || !target) {
+      target = defaultPlaylist;
+    }
+
+    if (!target.includes('/')) {
+      target = target.startsWith('37i9d') ? `playlist/${target}` : `track/${target}`;
+    }
+
+    return `https://open.spotify.com/embed/${target}?utm_source=generator&theme=0`;
+  };
+
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50 glass px-4 sm:px-8 py-2.5 shadow-[0_-10px_30px_rgba(0,0,0,0.8)]">
+      {/* HTML5 Audio Element for Direct Audio Mode */}
+      <audio
+        ref={audioRef}
+        src={currentTrack?.audioUrl}
+        onTimeUpdate={() => {
+          if (audioRef.current && activeSource === 'audio') {
+            setCurrentTime(audioRef.current.currentTime);
+            if (audioRef.current.duration) setDuration(audioRef.current.duration);
+          }
+        }}
+        onEnded={() => {
+          if (repeatOn && audioRef.current) {
+            audioRef.current.currentTime = 0;
+            audioRef.current.play();
+          } else {
+            onNextTrack();
+          }
+        }}
+      />
+
+      {/* Auto Fallback Alert Banner if YouTube blocked */}
+      {fallbackBanner && (
+        <div className="max-w-7xl mx-auto mb-2 px-3 py-1 bg-amber-500/20 border border-amber-500/50 rounded text-amber-300 text-xs font-sans flex items-center justify-between">
+          <span>⚠️ {fallbackBanner}</span>
+          <button onClick={() => setFallbackBanner(null)} className="text-amber-200 hover:text-white text-xs font-bold px-1 cursor-pointer">✕</button>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3">
-        {/* Track Title, Artwork & Retro Mini CRT Video Display */}
+        {/* Track Title, Artwork & Source Switcher Display */}
         <div className="flex items-center gap-3 w-full md:w-1/3">
-          {/* Visible Retro Cyber Cafe Mini CRT TV Screen */}
-          <div className="relative w-28 sm:w-36 h-16 sm:h-20 rounded-md bg-black border-2 border-cyan-500/50 flex items-center justify-center shrink-0 overflow-hidden shadow-[0_0_15px_rgba(6,182,212,0.3)]">
-            <div id="youtube-player-element" className="w-full h-full object-cover" />
-            <div className="absolute top-1 right-1 px-1 py-0.2 bg-red-600/90 text-[8px] font-digital text-white rounded tracking-widest pointer-events-none">
-              LIVE TV
-            </div>
+          {/* Audio Source Engine Display Screen */}
+          <div className="relative w-32 sm:w-40 h-16 sm:h-20 rounded-md bg-black border-2 border-cyan-500/50 flex items-center justify-center shrink-0 overflow-hidden shadow-[0_0_15px_rgba(6,182,212,0.3)]">
+            {/* Always keep YouTube container in DOM so API doesn't crash on unmount */}
+            <div
+              ref={containerRef}
+              className={`w-full h-full object-cover ${activeSource === 'youtube' ? 'block' : 'hidden'}`}
+            />
+            {activeSource === 'youtube' && (
+              <div className="absolute top-1 right-1 px-1 py-0.2 bg-red-600/90 text-[8px] font-digital text-white rounded tracking-widest pointer-events-none">
+                LIVE TV
+              </div>
+            )}
+
+            {activeSource === 'spotify' && (
+              <div className="w-full h-full bg-zinc-950 flex flex-col items-center justify-center p-0.5 relative">
+                <iframe
+                  src={getSpotifyEmbedUrl()}
+                  width="100%"
+                  height="100%"
+                  frameBorder="0"
+                  allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+                  loading="lazy"
+                  className="rounded w-full h-full"
+                  title="Spotify Player Widget"
+                />
+              </div>
+            )}
+
+            {activeSource === 'audio' && (
+              <div className="w-full h-full bg-zinc-900 flex flex-col items-center justify-center p-2 text-center">
+                <Radio className="w-6 h-6 text-emerald-400 animate-pulse mb-1" />
+                <span className="text-[9px] font-digital text-emerald-300 tracking-wider">
+                  HQ AUDIO STREAM
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="min-w-0 flex-1">
@@ -352,6 +461,54 @@ export const GlassPlayer: React.FC<GlassPlayerProps> = ({
             <p className="text-xs text-white/50 font-sans truncate">
               {currentTrack ? `${currentTrack.artist} • ${currentTrack.movieOrAlbum}` : 'Lav Pandey Music House'}
             </p>
+
+            {/* Source Switcher Toggle Buttons */}
+            <div className="flex items-center gap-1 mt-1.5">
+              <button
+                onClick={() => {
+                  if (soundFxEnabled) playButtonBeep();
+                  setActiveSource('youtube');
+                }}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-digital transition flex items-center gap-1 cursor-pointer ${
+                  activeSource === 'youtube'
+                    ? 'bg-red-900/80 text-red-300 border border-red-500/50'
+                    : 'bg-zinc-800/80 text-zinc-400 hover:text-white'
+                }`}
+                title="YouTube TV Video Stream"
+              >
+                <Tv className="w-3 h-3" /> YouTube
+              </button>
+
+              <button
+                onClick={() => {
+                  if (soundFxEnabled) playButtonBeep();
+                  setActiveSource('spotify');
+                }}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-digital transition flex items-center gap-1 cursor-pointer ${
+                  activeSource === 'spotify'
+                    ? 'bg-emerald-900/80 text-emerald-300 border border-emerald-500/50'
+                    : 'bg-zinc-800/80 text-zinc-400 hover:text-white'
+                }`}
+                title="Spotify Embed Official Audio Player"
+              >
+                <Music className="w-3 h-3 text-emerald-400" /> Spotify
+              </button>
+
+              <button
+                onClick={() => {
+                  if (soundFxEnabled) playButtonBeep();
+                  setActiveSource('audio');
+                }}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-digital transition flex items-center gap-1 cursor-pointer ${
+                  activeSource === 'audio'
+                    ? 'bg-cyan-900/80 text-cyan-300 border border-cyan-500/50'
+                    : 'bg-zinc-800/80 text-zinc-400 hover:text-white'
+                }`}
+                title="Direct HQ Audio MP3 Stream"
+              >
+                <Radio className="w-3 h-3" /> HQ MP3
+              </button>
+            </div>
           </div>
         </div>
 

@@ -9,6 +9,8 @@ export type CategoryId =
 export interface Track {
   id: string;
   youtubeId: string;
+  spotifyId?: string;
+  fallbackYoutubeIds?: string[];
   audioUrl?: string;
   title: string;
   artist: string;
