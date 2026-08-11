@@ -115,21 +115,39 @@
 
 ---
 
-## 🚀 Quick Start & Development
+## 🚀 Quick Start & Deployment
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/lav-pandey-music-house.git
+git clone https://github.com/mr7x00/LAV-PANDEY-MUSIC-HOUSE.git
 
 # 2. Navigate to project folder
-cd lav-pandey-music-house
+cd LAV-PANDEY-MUSIC-HOUSE
 
 # 3. Install dependencies
 npm install
 
 # 4. Start local development server
 npm run dev
+
+# 5. Build for GitHub Pages deployment
+npm run build
 ```
+
+### 🌐 Deploying to GitHub Pages (`gh-pages`)
+
+To deploy this project to GitHub Pages (e.g. `https://mr7x00.github.io/LAV-PANDEY-MUSIC-HOUSE/`):
+
+1. **Vite Base Path**: `vite.config.ts` is configured with `base: './'` so relative asset paths work automatically on GitHub Pages subpaths.
+2. **Push your code to GitHub**:
+   ```bash
+   git add .
+   git commit -m "Configure base path for GitHub Pages"
+   git push origin main
+   ```
+3. **Set up GitHub Pages**:
+   - Go to your repository **Settings** → **Pages**.
+   - Under **Build and deployment** → **Source**, select **GitHub Actions** (or select **Deploy from a branch** and pick `gh-pages` / `dist` folder).
 
 ---
 
